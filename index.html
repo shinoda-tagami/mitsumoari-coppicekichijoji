@@ -1754,7 +1754,7 @@ function ocrInit(){
     return OCRP=Promise.reject(new Error("金額読み取りの部品が見つかりません"));
   OCRP=Tesseract.createWorker("eng",1,{
     workerPath:"ocr/worker.min.js", corePath:"ocr/", langPath:"ocr/", gzip:true,
-    logger:m=>{ if(m.status&&SCANST.on) scanMsg(m.progress<1?"金額読み取りの準備中…":"準備できました"); }
+    logger:m=>{ if(m.status&&SCANST.on&&SCANST.stage==="ocr") scanMsg("金額読み取りの準備中…"); }
   }).then(w=>{ OCRW=w; return w.setParameters({
       tessedit_char_whitelist:"0123456789,.", tessedit_pageseg_mode:"6",
       preserve_interword_spaces:"1"}); }).then(()=>OCRW);
@@ -1800,7 +1800,7 @@ function ocrPrices(cv, anyRotation){
 }
 
 /* ---------- 読み取り画面 ---------- */
-const SCANST={on:false, mode:"fabric", stage:"cam", reader:null, stream:null,
+const SCANST={on:false, mode:"fabric", stage:"cam", reader:null, stream:null, timer:null,
               code:"", price:null, guess:null, raw:"", onOK:null, step:1};
 function scanMsg(s){ const e=document.getElementById("scanMsg"); if(e) e.textContent=s; }
 
@@ -1822,13 +1822,35 @@ function scanOverlay(){
   document.body.appendChild(o);
   return o;
 }
-function scanReader(){
-  if(SCANST.reader) return SCANST.reader;
+function scanHints(){
   const H=new Map();
+  /* UPC-A を外す。先頭0のEAN-13が12桁に化けるため */
   H.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[ZXing.BarcodeFormat.EAN_13,
     ZXing.BarcodeFormat.EAN_8, ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.CODE_39]);
   H.set(ZXing.DecodeHintType.TRY_HARDER,true);
-  return SCANST.reader=new ZXing.BrowserMultiFormatReader(H,150);
+  return H;
+}
+function scanReader(){
+  if(SCANST.reader) return SCANST.reader;
+  return SCANST.reader=new ZXing.BrowserMultiFormatReader(scanHints(),150);
+}
+/* ZXingの「映像から読む」機能は1フレームおきに白黒反転をかけるため、
+   商品札のような通常のバーコードを取りこぼす。ここでは映像を自前で
+   1枚ずつ切り出し、静止画と同じ（反転しない）経路で読む。 */
+let MFR=null, SCAN_CV=null;
+function mfReader(){
+  if(MFR) return MFR;
+  MFR=new ZXing.MultiFormatReader(); MFR.setHints(scanHints());
+  return MFR;
+}
+function decodeCanvas(cv){
+  try{
+    const src=new ZXing.HTMLCanvasElementLuminanceSource(cv);
+    const bmp=new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(src));
+    const r=mfReader().decodeWithState(bmp);
+    const f=ZXing.BarcodeFormat[r.getBarcodeFormat()];
+    return {code:normCode(r.getText(),f), fmt:f};
+  }catch(e){ return null; }
 }
 function normCode(code,fmt){
   return ((fmt==="UPC_A")&&/^\d{12}$/.test(code)) ? "0"+code : code;
@@ -1860,8 +1882,32 @@ function closeScan(){
   document.body.style.overflow="";
 }
 function scanStop(){
+  if(SCANST.timer){ clearTimeout(SCANST.timer); SCANST.timer=null; }
   try{ if(SCANST.reader) SCANST.reader.reset(); }catch(e){}
   if(SCANST.stream){ SCANST.stream.getTracks().forEach(t=>t.stop()); SCANST.stream=null; }
+}
+/* 自前の読み取りループ：映像を1枚切り出して静止画として読む */
+function scanLoop(n){
+  if(!SCANST.on || SCANST.stage!=="cam") return;
+  const vid=document.getElementById("scanVid");
+  if(vid && vid.videoWidth>0){
+    if(!SCAN_CV) SCAN_CV=document.createElement("canvas");
+    SCAN_CV.width=vid.videoWidth; SCAN_CV.height=vid.videoHeight;
+    SCAN_CV.getContext("2d",{willReadFrequently:true})
+      .drawImage(vid,0,0,SCAN_CV.width,SCAN_CV.height);
+    let hit=decodeCanvas(SCAN_CV);
+    /* 横向きに持たれた小物タグ用に、たまに90度回して試す */
+    if(!hit && n%3===1) hit=decodeCanvas(cvRotate(SCAN_CV,90));
+    if(!hit && n%3===2) hit=decodeCanvas(cvRotate(SCAN_CV,270));
+    if(hit){
+      SCANST.code=hit.code;
+      scanBeep();
+      scanFreeze(grabScan());
+      return;
+    }
+    if(n===12) scanMsg("見つかりません。もう少し近づけるか、下の「撮影して読む」をお試しください。");
+  }
+  SCANST.timer=setTimeout(()=>scanLoop(n+1), 220);
 }
 function scanStart(){
   SCANST.stage="cam";
@@ -1874,7 +1920,7 @@ function scanStart(){
   document.getElementById("scanGuide").dataset.t =
     second ? "金額が枠いっぱいになるように" : "タグを枠に合わせる";
   document.getElementById("scanFoot").innerHTML=
-    `<button class="btn ghost" onclick="scanPickFile()">写真から読む</button>
+    `<button class="btn" onclick="scanPickFile()">撮影して読む</button>
      <div class="spacer"></div>
      <button class="btn ghost" onclick="scanManual()">手入力にする</button>`;
   scanMsg(second?"金額の面をかざしてください":"かざしてください（バーコードを探しています）");
@@ -1885,16 +1931,13 @@ function scanStart(){
       facingMode:{ideal:"environment"}, width:{ideal:1920}, height:{ideal:1440}}})
     .then(st=>{
       SCANST.stream=st;
-      return scanReader().decodeFromStream(st, vid, (res)=>{
-        if(!SCANST.on||SCANST.stage!=="cam"||!res) return;
-        const fmt=ZXing.BarcodeFormat[res.getBarcodeFormat()];
-        SCANST.code=normCode(res.getText(),fmt);
-        scanBeep();
-        scanFreeze(grabScan());
-      });
+      vid.setAttribute("playsinline",""); vid.muted=true;
+      vid.srcObject=st;
+      return vid.play().catch(()=>{});
     })
+    .then(()=>{ scanLoop(0); })
     .catch(e=>{
-      scanMsg("カメラを開けませんでした（"+e.name+"）。「写真から読む」か「手入力にする」をお使いください。");
+      scanMsg("カメラを開けませんでした（"+e.name+"）。「撮影して読む」か「手入力にする」をお使いください。");
     });
 }
 /* 小物の2枚目：バーコードが無いので、3秒後に自動で1枚取り込む */
@@ -2030,6 +2073,7 @@ function scanPickFile(){
   let inp=document.getElementById("scanFile");
   if(!inp){
     inp=document.createElement("input"); inp.type="file"; inp.accept="image/*";
+    inp.setAttribute("capture","environment");
     inp.id="scanFile"; inp.style.display="none";
     inp.onchange=function(){ if(this.files&&this.files[0]) scanFromFile(this.files[0]); this.value=""; };
     document.body.appendChild(inp);
