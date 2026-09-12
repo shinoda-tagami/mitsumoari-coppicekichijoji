@@ -357,6 +357,9 @@ textarea:focus{outline:2px solid var(--accent);outline-offset:-1px;background:#f
 .scanmark{position:absolute;width:28px;height:28px;margin:-14px 0 0 -14px;border-radius:50%;
   border:3px solid #fbbf24;box-shadow:0 0 0 2px rgba(0,0,0,.5);display:none;pointer-events:none}
 
+.scanhead .ver{font-size:11px;color:#a8a29e;font-weight:600;margin-left:8px}
+.verinline{display:inline-block;font-size:11px;color:#a8a29e;font-weight:600;margin-left:6px}
+
 </style>
 </head>
 <body>
@@ -990,7 +993,8 @@ function renderBuilder(){
     h+=`<h2 class="step">STEP 4-1　表地（商品本体）</h2>
       <div class="card">
         <div class="scanbox">
-          <p class="lead">商品札のタグをカメラにかざすと、商品コードと税込価格が入ります。</p>
+          <p class="lead">商品札のタグを読み取ると、商品コードと税込価格が入ります。
+            <span class="verinline">${esc(SCAN_VER)}</span></p>
           <button class="btn bigbtn" onclick="scanFabric()">タグを読み取る</button>
           ${pcodeLine()}
         </div>
@@ -1054,8 +1058,9 @@ function renderGoods(){
   h+=`<h2 class="step">小物（仕立て・加工なし）</h2>
     <div class="card">
       <div class="scanbox">
-        <p class="lead">タグの<b>裏（バーコードの面）</b>→<b>表（金額の面）</b>の順に読み取ります。
-          片面に両方載っているタグは1回で終わります。</p>
+        <p class="lead">タグの<b>裏（バーコードの面）</b>と<b>表（金額の面）</b>を読み取ります。
+          片面に両方載っているタグは1回で終わります。
+          <span class="verinline">${esc(SCAN_VER)}</span></p>
         <button class="btn bigbtn" onclick="scanGoods()">タグを読み取る</button>
         ${pcodeLine()}
       </div>
@@ -1822,6 +1827,8 @@ function ocrPrices(cv, firstAngle, passes){
   return step(0);
 }
 
+const SCAN_VER="読み取り v3（タップ対応）";
+
 /* ---------- 読み取り画面 ----------
    ・「撮影して読み取る」＝ 端末のカメラで1枚撮る。解像度が高く、いちばん確実。
    ・「かざして読む」    ＝ 映像から自動で探す。速いが、暗所や小さい字には弱い。
@@ -1837,6 +1844,7 @@ function scanOverlay(){
   if(o) return o;
   o=document.createElement("div"); o.id="scanOv"; o.className="scanov";
   o.innerHTML=`<div class="scanhead"><b id="scanTitle">タグを読み取る</b>
+      <span class="ver">${SCAN_VER}</span>
       <div class="spacer"></div>
       <button class="btn ghost sm" onclick="closeScan()">閉じる</button></div>
     <div class="scanstage" id="scanStage">
