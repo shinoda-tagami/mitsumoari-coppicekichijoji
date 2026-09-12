@@ -342,6 +342,21 @@ textarea:focus{outline:2px solid var(--accent);outline-offset:-1px;background:#f
 .scanned{display:inline-block;font-size:11px;font-weight:700;background:#dcfce7;color:#166534;
   border-radius:999px;padding:2px 9px}
 
+/* 最初の選択画面 */
+.scanidle{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  background:#1c1917;padding:20px}
+.scanidle:empty{display:none}
+.idlebox{width:100%;max-width:420px;text-align:center}
+.idletx{color:#e7e5e4;font-size:15px;line-height:1.8;margin-bottom:18px}
+.scanov .btn.big{width:100%;font-size:17px;padding:16px;margin-bottom:10px}
+.scanres .sub2.dim{color:#78716c;font-size:14px;font-weight:600}
+
+/* 撮った写真は全体が見えるように（タップで場所を指すため） */
+.scanstage img{object-fit:contain;background:#000}
+.scanstage img.tappable{cursor:crosshair}
+.scanmark{position:absolute;width:28px;height:28px;margin:-14px 0 0 -14px;border-radius:50%;
+  border:3px solid #fbbf24;box-shadow:0 0 0 2px rgba(0,0,0,.5);display:none;pointer-events:none}
+
 </style>
 </head>
 <body>
@@ -1738,12 +1753,8 @@ function pickPrices(text){
     const hon=ns[i], zei=ns[j];
     if(zei===Math.round(hon*1.1)&&hon%100===0){ if(!pair||zei>pair.zei) pair={hon,zei}; }
   }
-  let guess=null;
-  if(!pair) ns.forEach(n=>{
-    if(n%1000===0){ const z=Math.round(n*1.1); if(!guess||z>guess.zei) guess={hon:n,zei:z,from:"本体"}; }
-    else if(n*10%11===0&&(n*10/11)%1000===0){ if(!guess||n>guess.zei) guess={hon:n*10/11,zei:n,from:"税込"}; }
-  });
-  return {pair,guess,all:ns};
+  /* 1つしか読めない場合は検算できないため、金額は出さない（推測は危険） */
+  return {pair, all:ns};
 }
 
 /* ---------- 文字認識（tesseract）— ocrフォルダが無ければ自動的に手入力へ ---------- */
@@ -1768,28 +1779,40 @@ function cvRotate(c,deg){
   x.translate(o.width/2,o.height/2); x.rotate(deg*Math.PI/180); x.drawImage(c,-c.width/2,-c.height/2);
   return o;
 }
+/* 文字認識に渡す画像の上限。これを超えると急激に遅くなるので必ず抑える */
+const OCR_MAX_PX=2600;
 function cvScale(c,s){
-  if(s===1) return c;
+  const long=Math.max(c.width,c.height);
+  let k=s;
+  if(long*k>OCR_MAX_PX) k=OCR_MAX_PX/long;
+  if(Math.abs(k-1)<0.02) return c;
   const o=document.createElement("canvas");
-  o.width=Math.round(c.width*s); o.height=Math.round(c.height*s);
+  o.width=Math.max(1,Math.round(c.width*k)); o.height=Math.max(1,Math.round(c.height*k));
   const x=o.getContext("2d"); x.imageSmoothingQuality="high";
   x.drawImage(c,0,0,o.width,o.height);
   return o;
 }
-const OCR_PASSES=[{s:1,p:6},{s:1,p:11},{s:2,p:6},{s:2,p:11},{s:3,p:6}];
-const OCR_BUDGET=12000;
-function ocrPrices(cv, anyRotation){
-  const angles = anyRotation ? [0,90,270,180] : [0];
+const OCR_QUICK=[{s:1,p:6}];                       /* 自動：全体をざっと1通り */
+const OCR_TAP=[{s:2,p:6},{s:2,p:11},{s:3,p:6}];    /* タップ後：狭い範囲を丁寧に */
+const OCR_BUDGET=14000;
+/* firstAngle … バーコードが見つかった向き。そこから試すと1回で当たりやすい。
+   見つからなくても、必ず4方向すべてを試す（タグが横倒しでも読めるように）。 */
+function ocrPrices(cv, firstAngle, passes){
+  const angles=[]; [firstAngle|0,0,90,270,180].forEach(a=>{ if(angles.indexOf(a)<0) angles.push(a); });
   const jobs=[];
-  OCR_PASSES.forEach(P=>angles.forEach(r=>jobs.push({r,s:P.s,p:P.p})));
-  const texts=[]; const t0=Date.now();
+  (passes||OCR_QUICK).forEach(P=>angles.forEach(r=>jobs.push({r,s:P.s,p:P.p})));
+  const texts=[]; const t0=Date.now(); const seen={};
   const done=()=>{ const t=texts.join("\n"); return {text:t, prices:pickPrices(t), ms:Date.now()-t0}; };
   const step=i=>{
     if(i>=jobs.length||Date.now()-t0>OCR_BUDGET) return Promise.resolve(done());
     const j=jobs[i];
+    const img=cvScale(cvRotate(cv,j.r),j.s);
+    const key=j.r+"/"+j.p+"/"+img.width+"x"+img.height;
+    if(seen[key]) return step(i+1);          /* 上限で同じ大きさになったパスは飛ばす */
+    seen[key]=1;
     scanMsg("金額を読み取っています…（"+(i+1)+"/"+jobs.length+"）");
     return ocrInit()
-      .then(w=>w.setParameters({tessedit_pageseg_mode:String(j.p)}).then(()=>w.recognize(cvScale(cvRotate(cv,j.r),j.s))))
+      .then(w=>w.setParameters({tessedit_pageseg_mode:String(j.p)}).then(()=>w.recognize(img)))
       .then(r=>{
         texts.push((r.data.text||"").replace(/\s+/g," ").trim());
         return pickPrices(texts.join("\n")).pair ? done() : step(i+1);
@@ -1799,10 +1822,15 @@ function ocrPrices(cv, anyRotation){
   return step(0);
 }
 
-/* ---------- 読み取り画面 ---------- */
-const SCANST={on:false, mode:"fabric", stage:"cam", reader:null, stream:null, timer:null,
-              code:"", price:null, guess:null, raw:"", onOK:null, step:1};
+/* ---------- 読み取り画面 ----------
+   ・「撮影して読み取る」＝ 端末のカメラで1枚撮る。解像度が高く、いちばん確実。
+   ・「かざして読む」    ＝ 映像から自動で探す。速いが、暗所や小さい字には弱い。
+   どちらの経路でも、金額は「税込＝本体×1.1」が成り立った時だけ確定にする。
+   成り立たない時は金額を出さず、手入力に回す（推測した金額は表示しない）。  */
+const SCANST={on:false, mode:"fabric", stage:"idle", reader:null, stream:null, timer:null,
+              code:"", price:null, hon:null, raw:"", onOK:null, shots:0, img:null};
 function scanMsg(s){ const e=document.getElementById("scanMsg"); if(e) e.textContent=s; }
+function scanSet(id,html){ const e=document.getElementById(id); if(e) e.innerHTML=html; }
 
 function scanOverlay(){
   let o=document.getElementById("scanOv");
@@ -1815,6 +1843,8 @@ function scanOverlay(){
       <video id="scanVid" playsinline muted autoplay></video>
       <img id="scanShot" alt="">
       <div class="scanguide" id="scanGuide" data-t="タグを枠に合わせる"></div>
+      <div class="scanidle" id="scanIdle"></div>
+      <div class="scanmark" id="scanMark"></div>
     </div>
     <div class="scanmsg" id="scanMsg"></div>
     <div class="scanres" id="scanRes"></div>
@@ -1822,6 +1852,19 @@ function scanOverlay(){
   document.body.appendChild(o);
   return o;
 }
+function scanBeep(){
+  try{ const A=window.AudioContext||window.webkitAudioContext; if(!A) return;
+    const c=new A(), o=c.createOscillator(), g=c.createGain();
+    o.type="sine"; o.frequency.value=1180; o.connect(g); g.connect(c.destination);
+    g.gain.setValueAtTime(.001,c.currentTime);
+    g.gain.exponentialRampToValueAtTime(.25,c.currentTime+.01);
+    g.gain.exponentialRampToValueAtTime(.001,c.currentTime+.16);
+    o.start(); o.stop(c.currentTime+.18);
+  }catch(e){}
+}
+
+
+/* ---------- バーコード読み取りの土台 ---------- */
 function scanHints(){
   const H=new Map();
   /* UPC-A を外す。先頭0のEAN-13が12桁に化けるため */
@@ -1834,10 +1877,13 @@ function scanReader(){
   if(SCANST.reader) return SCANST.reader;
   return SCANST.reader=new ZXing.BrowserMultiFormatReader(scanHints(),150);
 }
-/* ZXingの「映像から読む」機能は1フレームおきに白黒反転をかけるため、
-   商品札のような通常のバーコードを取りこぼす。ここでは映像を自前で
-   1枚ずつ切り出し、静止画と同じ（反転しない）経路で読む。 */
-let MFR=null, SCAN_CV=null;
+/* 12桁で返ってきたら、タグに印字された13桁の形に戻す */
+function normCode(code,fmt){
+  return ((fmt==="UPC_A"||fmt==="UPC-A") && /^\d{12}$/.test(code)) ? "0"+code : code;
+}
+/* ZXingの「映像から読む」機能は1フレームおきに白黒反転をかけ、商品札のような
+   通常のバーコードを取りこぼす。映像も静止画と同じ（反転しない）経路で読む。 */
+let MFR=null;
 function mfReader(){
   if(MFR) return MFR;
   MFR=new ZXing.MultiFormatReader(); MFR.setHints(scanHints());
@@ -1852,29 +1898,16 @@ function decodeCanvas(cv){
     return {code:normCode(r.getText(),f), fmt:f};
   }catch(e){ return null; }
 }
-function normCode(code,fmt){
-  return ((fmt==="UPC_A")&&/^\d{12}$/.test(code)) ? "0"+code : code;
-}
-function scanBeep(){
-  try{ const A=window.AudioContext||window.webkitAudioContext; if(!A) return;
-    const c=new A(), o=c.createOscillator(), g=c.createGain();
-    o.type="sine"; o.frequency.value=1180; o.connect(g); g.connect(c.destination);
-    g.gain.setValueAtTime(.001,c.currentTime);
-    g.gain.exponentialRampToValueAtTime(.25,c.currentTime+.01);
-    g.gain.exponentialRampToValueAtTime(.001,c.currentTime+.16);
-    o.start(); o.stop(c.currentTime+.18);
-  }catch(e){}
-}
 
-/* mode: "fabric"（反物・帯：1枚で完結） / "goods"（小物：裏→表の2枚） */
+/* ---------- 出入口 ---------- */
 function openScan(mode, onOK){
   if(typeof ZXing==="undefined"){ alert("読み取り部品を読み込めませんでした。金額は手入力でお願いします。"); return; }
   SCANST.on=true; SCANST.mode=mode; SCANST.onOK=onOK;
-  SCANST.code=""; SCANST.price=null; SCANST.guess=null; SCANST.raw=""; SCANST.step=1;
+  SCANST.code=""; SCANST.price=null; SCANST.hon=null; SCANST.raw=""; SCANST.shots=0;
   scanOverlay().style.display="flex";
   document.body.style.overflow="hidden";
   ocrInit().catch(()=>{});
-  scanStart();
+  scanIdle();
 }
 function closeScan(){
   SCANST.on=false; scanStop();
@@ -1886,189 +1919,50 @@ function scanStop(){
   try{ if(SCANST.reader) SCANST.reader.reset(); }catch(e){}
   if(SCANST.stream){ SCANST.stream.getTracks().forEach(t=>t.stop()); SCANST.stream=null; }
 }
-/* 自前の読み取りループ：映像を1枚切り出して静止画として読む */
-function scanLoop(n){
-  if(!SCANST.on || SCANST.stage!=="cam") return;
-  const vid=document.getElementById("scanVid");
-  if(vid && vid.videoWidth>0){
-    if(!SCAN_CV) SCAN_CV=document.createElement("canvas");
-    SCAN_CV.width=vid.videoWidth; SCAN_CV.height=vid.videoHeight;
-    SCAN_CV.getContext("2d",{willReadFrequently:true})
-      .drawImage(vid,0,0,SCAN_CV.width,SCAN_CV.height);
-    let hit=decodeCanvas(SCAN_CV);
-    /* 横向きに持たれた小物タグ用に、たまに90度回して試す */
-    if(!hit && n%3===1) hit=decodeCanvas(cvRotate(SCAN_CV,90));
-    if(!hit && n%3===2) hit=decodeCanvas(cvRotate(SCAN_CV,270));
-    if(hit){
-      SCANST.code=hit.code;
-      scanBeep();
-      scanFreeze(grabScan());
-      return;
-    }
-    if(n===12) scanMsg("見つかりません。もう少し近づけるか、下の「撮影して読む」をお試しください。");
-  }
-  SCANST.timer=setTimeout(()=>scanLoop(n+1), 220);
-}
-function scanStart(){
-  SCANST.stage="cam";
+
+/* ---------- 最初の選択画面 ---------- */
+function scanIdle(){
+  SCANST.stage="idle"; scanStop();
   const vid=document.getElementById("scanVid"), shot=document.getElementById("scanShot");
-  vid.style.display="block"; shot.style.display="none";
-  document.getElementById("scanRes").innerHTML="";
-  const goods=SCANST.mode==="goods", second=goods&&SCANST.step===2;
+  vid.style.display="none"; shot.style.display="none";
+  document.getElementById("scanGuide").style.display="none";
+  const need=scanNeed();
   document.getElementById("scanTitle").textContent =
-    goods ? (second?"小物：表（金額の面）":"小物：裏（バーコードの面）") : "商品タグを読み取る";
-  document.getElementById("scanGuide").dataset.t =
-    second ? "金額が枠いっぱいになるように" : "タグを枠に合わせる";
-  document.getElementById("scanFoot").innerHTML=
-    `<button class="btn" onclick="scanPickFile()">撮影して読む</button>
-     <div class="spacer"></div>
-     <button class="btn ghost" onclick="scanManual()">手入力にする</button>`;
-  scanMsg(second?"金額の面をかざしてください":"かざしてください（バーコードを探しています）");
-
-  if(second){ scanCountdown(); return; }        /* 2枚目はバーコードが無いので自動撮影 */
-
-  navigator.mediaDevices.getUserMedia({audio:false,video:{
-      facingMode:{ideal:"environment"}, width:{ideal:1920}, height:{ideal:1440}}})
-    .then(st=>{
-      SCANST.stream=st;
-      vid.setAttribute("playsinline",""); vid.muted=true;
-      vid.srcObject=st;
-      return vid.play().catch(()=>{});
-    })
-    .then(()=>{ scanLoop(0); })
-    .catch(e=>{
-      scanMsg("カメラを開けませんでした（"+e.name+"）。「撮影して読む」か「手入力にする」をお使いください。");
-    });
+    SCANST.mode==="goods" ? "小物のタグを読み取る" : "商品タグを読み取る";
+  scanSet("scanIdle",
+    `<div class="idlebox">
+       <div class="idletx">${need.lead}</div>
+       <button class="btn big" onclick="scanPickFile()">${need.shotLabel}</button>
+       <button class="btn ghost big" onclick="scanLive()">かざして読む</button>
+     </div>`);
+  scanSet("scanRes", scanHave());
+  scanSet("scanFoot",
+    `<div class="spacer"></div><button class="btn ghost" onclick="scanManual()">手入力にする</button>`);
+  scanMsg("");
 }
-/* 小物の2枚目：バーコードが無いので、3秒後に自動で1枚取り込む */
-function scanCountdown(){
-  const vid=document.getElementById("scanVid");
-  navigator.mediaDevices.getUserMedia({audio:false,video:{
-      facingMode:{ideal:"environment"}, width:{ideal:1920}, height:{ideal:1440}}})
-    .then(st=>{
-      SCANST.stream=st; vid.srcObject=st; vid.play();
-      document.getElementById("scanFoot").innerHTML=
-        `<button class="btn" onclick="scanShoot()">いま撮る</button>
-         <div class="spacer"></div>
-         <button class="btn ghost" onclick="scanManual()">手入力にする</button>`;
-      let n=3;
-      scanMsg("金額の面を枠に合わせてください（"+n+"）");
-      const iv=setInterval(()=>{
-        if(!SCANST.on||SCANST.stage!=="cam"){ clearInterval(iv); return; }
-        n--;
-        if(n<=0){ clearInterval(iv); scanShoot(); }
-        else scanMsg("金額の面を枠に合わせてください（"+n+"）");
-      },1000);
-    })
-    .catch(e=>{ scanMsg("カメラを開けませんでした。「写真から読む」をお使いください。"); });
+/* いま何が足りないか */
+function scanNeed(){
+  const noCode=!SCANST.code, noPrice=SCANST.price==null;
+  if(noCode&&noPrice) return {lead:"タグ全体が大きく写るように撮ってください。<br>バーコードと金額を同時に読み取ります。",
+                              shotLabel:"タグを撮影して読み取る"};
+  if(noPrice) return {lead:"バーコードは読み取れました。<br><b>金額が印字された面</b>を撮ってください。",
+                      shotLabel:"金額の面を撮影する"};
+  return {lead:"金額は読み取れました。<br><b>バーコードの面</b>を撮ってください。",
+          shotLabel:"バーコードの面を撮影する"};
 }
-function scanShoot(){ if(SCANST.stage==="cam") scanFreeze(grabScan()); }
-
-function grabScan(){
-  const vid=document.getElementById("scanVid"), stage=document.getElementById("scanStage");
-  const vw=vid.videoWidth, vh=vid.videoHeight;
-  const full=document.createElement("canvas"); full.width=vw; full.height=vh;
-  full.getContext("2d").drawImage(vid,0,0,vw,vh);
-  let roi=full;
-  try{
-    const sw=stage.clientWidth, sh=stage.clientHeight;
-    const k=Math.max(sw/vw, sh/vh), ox=(vw*k-sw)/2, oy=(vh*k-sh)/2;
-    let gx=(0.06*sw+ox)/k, gy=(0.08*sh+oy)/k, gw=(0.88*sw)/k, gh=(0.84*sh)/k;
-    gx=Math.max(0,gx); gy=Math.max(0,gy); gw=Math.min(vw-gx,gw); gh=Math.min(vh-gy,gh);
-    if(gw>80&&gh>80){
-      roi=document.createElement("canvas"); roi.width=Math.round(gw); roi.height=Math.round(gh);
-      roi.getContext("2d").drawImage(full,Math.round(gx),Math.round(gy),roi.width,roi.height,
-        0,0,roi.width,roi.height);
-    }
-  }catch(e){}
-  return {full,roi};
-}
-
-function scanFreeze(g){
-  SCANST.stage="ocr";
-  scanStop();
-  const vid=document.getElementById("scanVid"), shot=document.getElementById("scanShot");
-  shot.src=g.full.toDataURL("image/jpeg",0.85);
-  shot.style.display="block"; vid.style.display="none";
-  document.getElementById("scanFoot").innerHTML=
-    `<button class="btn ghost" onclick="scanStart()">撮り直す</button>
-     <div class="spacer"></div>
-     <button class="btn ghost" onclick="scanManual()">手入力にする</button>`;
-
-  /* 小物の1枚目（裏）はバーコードだけ取れれば良い。金額は2枚目で読む */
-  if(SCANST.mode==="goods"&&SCANST.step===1){
-    if(!SCANST.code){ scanMsg("バーコードが読めませんでした。撮り直してください。"); return; }
-    SCANST.step=2;
-    document.getElementById("scanRes").innerHTML=
-      `<div class="sres warn"><div class="k">商品バーコード</div><div class="code">${esc(SCANST.code)}</div>
-        <p>続けて<b>表（金額の面）</b>を読み取ります。</p></div>`;
-    document.getElementById("scanFoot").innerHTML=
-      `<button class="btn" onclick="scanStart()">表（金額）を撮る</button>
-       <div class="spacer"></div>
-       <button class="btn ghost" onclick="scanManual()">金額は手入力にする</button>`;
-    scanMsg("裏面を読みました。");
-    return;
+function scanHave(){
+  if(!SCANST.code && SCANST.price==null) return "";
+  let h=`<div class="sres ok">`;
+  if(SCANST.code) h+=`<div class="k">商品バーコード</div><div class="code">${esc(SCANST.code)}</div>`;
+  if(SCANST.price!=null){
+    h+=`<div class="k mt">税込<span class="bdg ok">税込＝本体×1.1 で一致</span></div>
+        <div class="big">${yen(SCANST.price)}</div>
+        <div class="sub2">本体 ${yen(SCANST.hon)}</div>`;
   }
-  const anyRot = (SCANST.mode==="goods");
-  ocrPrices(g.roi, anyRot).then(r=>{
-    SCANST.raw=r.text;
-    const P=r.prices;
-    SCANST.price = P.pair ? P.pair.zei : null;
-    SCANST.guess = (!P.pair&&P.guess) ? P.guess.zei : null;
-    scanResult(P, r.ms);
-  }).catch(e=>{
-    scanMsg("金額の自動読み取りは使えません（"+e.message+"）。");
-    scanResult({pair:null,guess:null,all:[]},0);
-  });
+  return h+`</div>`;
 }
 
-function scanResult(P, ms){
-  SCANST.stage="done";
-  const codeHTML = SCANST.code
-    ? `<div class="k">商品バーコード</div><div class="code">${esc(SCANST.code)}</div>`
-    : `<div class="k warnk">バーコードは読み取れませんでした</div>`;
-  let h="", foot="";
-  if(P.pair){
-    h=`<div class="sres ok">${codeHTML}
-      <div class="k mt">税込（この金額を使います）<span class="bdg ok">税込＝本体×1.1 で一致</span></div>
-      <div class="big">${yen(P.pair.zei)}</div>
-      <div class="sub2">本体 ${yen(P.pair.hon)}</div></div>`;
-    foot=`<button class="btn ghost" onclick="scanStart()">撮り直す</button><div class="spacer"></div>
-      <button class="btn ghost" onclick="scanManual()">手入力にする</button>
-      <button class="btn" onclick="scanAccept()">この内容で入力</button>`;
-  }else if(P.guess){
-    h=`<div class="sres warn">${codeHTML}
-      <div class="k mt">推定（${esc(P.guess.from)}の行だけ読めました）<span class="bdg warn">要確認</span></div>
-      <div class="big">${yen(P.guess.zei)}</div>
-      <div class="sub2">本体 ${yen(P.guess.hon)}</div>
-      <p><b>タグの表示と合っているか、目でお確かめください。</b></p></div>`;
-    foot=`<button class="btn ghost" onclick="scanStart()">撮り直す</button><div class="spacer"></div>
-      <button class="btn ghost" onclick="scanManual()">手入力にする</button>
-      <button class="btn warnbtn" onclick="scanAccept()">確認した・これで入力</button>`;
-  }else{
-    const cand=P.all.length?`<div class="sub2">拾えた数字：${P.all.map(yen).join(" ／ ")}</div>`:"";
-    h=`<div class="sres ng">${codeHTML}
-      <div class="k mt">金額を読み取れませんでした</div>${cand}
-      <p>明るい場所で、金額の行が枠いっぱいになるように撮り直すか、手入力にしてください。</p></div>`;
-    foot=`<button class="btn ghost" onclick="scanStart()">撮り直す</button><div class="spacer"></div>
-      <button class="btn" onclick="scanManual()">手入力にする</button>`;
-  }
-  document.getElementById("scanRes").innerHTML=h;
-  document.getElementById("scanFoot").innerHTML=foot;
-  scanMsg(ms?("読み取り "+(ms/1000).toFixed(1)+"秒"):"");
-}
-function scanAccept(){
-  const v=SCANST.price||SCANST.guess||0;
-  const cb=SCANST.onOK; const code=SCANST.code;
-  closeScan();
-  if(cb) cb({code, price:v, manual:false});
-}
-function scanManual(){
-  const cb=SCANST.onOK; const code=SCANST.code;
-  closeScan();
-  if(cb) cb({code, price:0, manual:true});
-}
-/* カメラが使えない時のための写真取り込み */
+/* ---------- 撮影して読み取る ---------- */
 function scanPickFile(){
   let inp=document.getElementById("scanFile");
   if(!inp){
@@ -2083,32 +1977,232 @@ function scanPickFile(){
 function scanFromFile(file){
   const url=URL.createObjectURL(file), img=new Image();
   img.onload=()=>{
+    /* 写真は解像度が高い。文字認識に効く範囲で縮小する */
     const cv=document.createElement("canvas");
-    const s=Math.min(1,2200/Math.max(img.width,img.height));
+    const s=Math.min(1, 1600/Math.max(img.width,img.height));
     cv.width=Math.round(img.width*s); cv.height=Math.round(img.height*s);
     cv.getContext("2d").drawImage(img,0,0,cv.width,cv.height);
     URL.revokeObjectURL(url);
-    const shot=document.getElementById("scanShot"), vid=document.getElementById("scanVid");
-    shot.src=cv.toDataURL("image/jpeg",0.85); shot.style.display="block"; vid.style.display="none";
-    SCANST.stage="ocr"; scanStop();
-    scanMsg("バーコードを探しています…");
-    const angles=[0,90,270,180];
-    const tryRot=i=>{
-      if(i>=angles.length) return Promise.resolve(null);
-      return scanReader().decodeFromImageUrl(cvRotate(cv,angles[i]).toDataURL("image/jpeg",0.92))
-        .then(r=>({code:normCode(r.getText(),ZXing.BarcodeFormat[r.getBarcodeFormat()])}))
-        .catch(()=>tryRot(i+1));
-    };
-    tryRot(0).then(o=>{
-      if(o) SCANST.code=o.code;
-      return ocrPrices(cv,true);
-    }).then(r=>{ SCANST.raw=r.text;
-      SCANST.price=r.prices.pair?r.prices.pair.zei:null;
-      SCANST.guess=(!r.prices.pair&&r.prices.guess)?r.prices.guess.zei:null;
-      scanResult(r.prices,r.ms);
-    }).catch(e=>{ scanMsg("読み取れませんでした（"+e.message+"）"); scanResult({pair:null,guess:null,all:[]},0); });
+    scanShowImage(cv);
+    scanAnalyse(cv, img.width+"×"+img.height);
   };
+  img.onerror=()=>{ scanMsg("写真を読み込めませんでした。"); };
   img.src=url;
+}
+
+/* ---------- かざして読む ---------- */
+function scanLive(){
+  SCANST.stage="cam"; SCANST.shots=0;
+  const vid=document.getElementById("scanVid"), shot=document.getElementById("scanShot");
+  scanSet("scanIdle",""); shot.style.display="none"; vid.style.display="block";
+  const g=document.getElementById("scanGuide");
+  g.style.display=""; g.dataset.t="タグを枠に合わせる";
+  scanSet("scanFoot",
+    `<button class="btn" onclick="scanPickFile()">撮影して読む</button>
+     <div class="spacer"></div>
+     <button class="btn ghost" onclick="scanIdle()">やめる</button>`);
+  scanMsg("かざしてください（探しています）");
+  navigator.mediaDevices.getUserMedia({audio:false,video:{
+      facingMode:{ideal:"environment"}, width:{ideal:1920}, height:{ideal:1440}}})
+    .then(st=>{
+      SCANST.stream=st;
+      vid.setAttribute("playsinline",""); vid.muted=true; vid.srcObject=st;
+      return vid.play().catch(()=>{});
+    })
+    .then(()=>scanLoop(0))
+    .catch(e=>{
+      scanMsg("カメラを開けませんでした（"+e.name+"）。「撮影して読む」をお使いください。");
+      scanSet("scanFoot",`<button class="btn" onclick="scanPickFile()">撮影して読む</button>
+        <div class="spacer"></div><button class="btn ghost" onclick="scanManual()">手入力にする</button>`);
+    });
+}
+let SCAN_CV=null;
+function scanLoop(n){
+  if(!SCANST.on || SCANST.stage!=="cam") return;
+  const vid=document.getElementById("scanVid");
+  if(vid && vid.videoWidth>0){
+    if(!SCAN_CV) SCAN_CV=document.createElement("canvas");
+    SCAN_CV.width=vid.videoWidth; SCAN_CV.height=vid.videoHeight;
+    SCAN_CV.getContext("2d",{willReadFrequently:true})
+      .drawImage(vid,0,0,SCAN_CV.width,SCAN_CV.height);
+    let hit=decodeCanvas(SCAN_CV);
+    if(!hit && n%3===1) hit=decodeCanvas(cvRotate(SCAN_CV,90));
+    if(!hit && n%3===2) hit=decodeCanvas(cvRotate(SCAN_CV,270));
+    if(hit){
+      scanBeep();
+      const g=grabScan();
+      scanShowImage(g.full);
+      scanStop();
+      SCANST.code=hit.code;
+      scanAnalyse(g.roi, "映像 "+SCAN_CV.width+"×"+SCAN_CV.height);
+      return;
+    }
+    if(n===16) scanMsg("見つかりません。「撮影して読む」のほうが確実です。");
+  }
+  SCANST.timer=setTimeout(()=>scanLoop(n+1), 220);
+}
+function grabScan(){
+  const vid=document.getElementById("scanVid"), stage=document.getElementById("scanStage");
+  const vw=vid.videoWidth, vh=vid.videoHeight;
+  const full=document.createElement("canvas"); full.width=vw; full.height=vh;
+  full.getContext("2d").drawImage(vid,0,0,vw,vh);
+  let roi=full;
+  try{
+    const sw=stage.clientWidth, sh=stage.clientHeight;
+    const k=Math.max(sw/vw, sh/vh), ox=(vw*k-sw)/2, oy=(vh*k-sh)/2;
+    let gx=(0.06*sw+ox)/k, gy=(0.08*sh+oy)/k, gw=(0.88*sw)/k, gh=(0.84*sh)/k;
+    gx=Math.max(0,gx); gy=Math.max(0,gy); gw=Math.min(vw-gx,gw); gh=Math.min(vh-gy,gh);
+    if(gw>80&&gh>80){
+      roi=document.createElement("canvas");
+      roi.width=Math.round(gw); roi.height=Math.round(gh);
+      roi.getContext("2d").drawImage(full,Math.round(gx),Math.round(gy),roi.width,roi.height,
+        0,0,roi.width,roi.height);
+    }
+  }catch(e){}
+  return {full,roi};
+}
+function scanShowImage(cv){
+  const vid=document.getElementById("scanVid"), shot=document.getElementById("scanShot");
+  scanSet("scanIdle","");
+  document.getElementById("scanGuide").style.display="none";
+  shot.src=cv.toDataURL("image/jpeg",0.85);
+  shot.style.display="block"; vid.style.display="none";
+}
+
+/* ---------- 解析 ---------- */
+function scanAnalyse(cv, note){
+  SCANST.stage="ocr"; SCANST.shots++; SCANST.img=cv;
+  scanSet("scanFoot",`<div class="spacer"></div><button class="btn ghost" onclick="scanManual()">手入力にする</button>`);
+  scanMsg("読み取っています…");
+  /* この写真にバーコードがあれば拾う（まだ無い場合） */
+  const findCode = SCANST.code ? Promise.resolve(null) : (()=> {
+    const angles=[0,90,270,180];
+    const step=i=>{
+      if(i>=angles.length) return Promise.resolve(null);
+      const hit=decodeCanvas(cvRotate(cv,angles[i]));
+      return hit?Promise.resolve(hit):Promise.resolve().then(()=>step(i+1));
+    };
+    return step(0);
+  })();
+  findCode.then(hit=>{
+    if(hit) SCANST.code=hit.code;
+    return (SCANST.price==null) ? ocrPrices(cv,0,OCR_QUICK) : null;
+  }).then(r=>{
+    if(r){
+      SCANST.raw=r.text;
+      if(r.prices.pair){ SCANST.price=r.prices.pair.zei; SCANST.hon=r.prices.pair.hon; }
+      SCANST.cands=r.prices.all||[];
+    }
+    scanResult(note);
+  }).catch(e=>{
+    SCANST.cands=[];
+    scanMsg("金額の自動読み取りは使えません（"+e.message+"）");
+    scanResult(note);
+  });
+}
+
+function scanResult(note){
+  const okCode=!!SCANST.code, okPrice=SCANST.price!=null;
+  if(!okPrice && SCANST.img){ scanTapAsk(); return; }   /* 金額はタップで確実に読む */
+  SCANST.stage="done";
+  let h=scanHave(), foot="";
+  if(okCode&&okPrice){
+    foot=`<button class="btn ghost" onclick="scanIdle()">撮り直す</button><div class="spacer"></div>
+      <button class="btn ghost" onclick="scanManual()">手入力にする</button>
+      <button class="btn" onclick="scanAccept()">この内容で入力</button>`;
+    scanMsg("読み取れました。タグの表示と合っているかご確認ください。");
+  }else{
+    h+=`<div class="sres ng"><div class="k warnk">バーコードを読み取れませんでした</div>
+      <p>もう一度撮るか、手入力にしてください。</p></div>`;
+    foot=`<button class="btn" onclick="scanIdle()">もう一度撮る</button><div class="spacer"></div>
+      <button class="btn ghost" onclick="scanManual()">手入力にする</button>`;
+  }
+  scanSet("scanRes",h); scanSet("scanFoot",foot);
+}
+
+/* ---------- 金額はタップで場所を教えてもらう ---------- */
+function scanTapAsk(){
+  SCANST.stage="tap";
+  const shot=document.getElementById("scanShot");
+  shot.classList.add("tappable");
+  shot.onclick=scanTapped;
+  scanSet("scanRes", scanHave()+
+    `<div class="sres warn"><div class="k warnk">金額の場所を教えてください</div>
+      <p>上の写真の<b>金額が書いてある行を指でタップ</b>してください。<br>
+        その部分だけを拡大して読み取ります（税込と本体の両方が入るように）。</p></div>`);
+  scanSet("scanFoot",
+    `<button class="btn ghost" onclick="scanIdle()">撮り直す</button><div class="spacer"></div>
+     <button class="btn ghost" onclick="scanManual()">手入力にする</button>`);
+  scanMsg("金額の行をタップしてください");
+}
+function scanTapped(ev){
+  if(SCANST.stage!=="tap") return;
+  const shot=document.getElementById("scanShot"), cv=SCANST.img;
+  if(!cv) return;
+  const r=shot.getBoundingClientRect();
+  const k=Math.min(r.width/cv.width, r.height/cv.height);   /* object-fit:contain */
+  const dw=cv.width*k, dh=cv.height*k;
+  const px=((ev.clientX-r.left)-(r.width-dw)/2)/k;
+  const py=((ev.clientY-r.top )-(r.height-dh)/2)/k;
+  if(px<0||py<0||px>cv.width||py>cv.height) return;
+  const mk=document.getElementById("scanMark");
+  if(mk){ mk.style.display="block";
+    mk.style.left=((r.width-dw)/2+px*k)+"px"; mk.style.top=((r.height-dh)/2+py*k)+"px"; }
+  scanTapAt(px/cv.width, py/cv.height);
+}
+/* nx,ny は写真に対する割合（0〜1）。その周りだけを切り出して読む。 */
+function scanTapAt(nx,ny){
+  const cv=SCANST.img; if(!cv) return;
+  const shot=document.getElementById("scanShot");
+  SCANST.stage="ocr";
+  shot.onclick=null; shot.classList.remove("tappable");
+  scanMsg("その周りを読み取っています…");
+  scanSet("scanFoot",`<div class="spacer"></div><button class="btn ghost" onclick="scanManual()">手入力にする</button>`);
+  const side=Math.round(Math.max(cv.width,cv.height)*0.50);
+  const w=Math.min(side,cv.width), h=Math.min(side,cv.height);
+  let x=Math.round(nx*cv.width-w/2), y=Math.round(ny*cv.height-h/2);
+  x=Math.max(0,Math.min(cv.width-w,x)); y=Math.max(0,Math.min(cv.height-h,y));
+  const c=document.createElement("canvas"); c.width=w; c.height=h;
+  c.getContext("2d").drawImage(cv,x,y,w,h,0,0,w,h);
+  SCANST.tapCrop=c.width+"x"+c.height+"@"+x+","+y;
+  ocrPrices(c,0,OCR_TAP).then(r2=>{
+    SCANST.raw=r2.text;
+    if(r2.prices.pair){ SCANST.price=r2.prices.pair.zei; SCANST.hon=r2.prices.pair.hon;
+      scanResultFinal(); }
+    else scanTapRetry(r2.prices.all||[]);
+  }).catch(()=>scanTapRetry([]));
+}
+function scanResultFinal(){
+  SCANST.stage="done";
+  scanSet("scanRes", scanHave());
+  scanSet("scanFoot",
+    `<button class="btn ghost" onclick="scanIdle()">撮り直す</button><div class="spacer"></div>
+     <button class="btn ghost" onclick="scanManual()">手入力にする</button>
+     <button class="btn" onclick="scanAccept()">この内容で入力</button>`);
+  scanMsg("読み取れました。タグの表示と合っているかご確認ください。");
+}
+function scanTapRetry(cands){
+  const mk=document.getElementById("scanMark"); if(mk) mk.style.display="none";
+  SCANST.stage="tap";
+  const shot=document.getElementById("scanShot");
+  shot.classList.add("tappable"); shot.onclick=scanTapped;
+  const c=cands.length?`<div class="sub2 dim">拾えた数字：${cands.map(n=>n.toLocaleString()).join(" ／ ")}</div>`:"";
+  scanSet("scanRes", scanHave()+
+    `<div class="sres ng"><div class="k warnk">その場所では読み取れませんでした</div>${c}
+      <p>金額の行の<b>まん中あたり</b>をもう一度タップしてみてください。<br>
+        税込と本体の2行が両方入る位置だと読み取れます。うまくいかなければ手入力にしてください。</p></div>`);
+  scanMsg("もう一度タップしてください");
+}
+
+function scanAccept(){
+  const cb=SCANST.onOK, code=SCANST.code, price=SCANST.price||0;
+  closeScan();
+  if(cb) cb({code, price, manual:false});
+}
+function scanManual(){
+  const cb=SCANST.onOK, code=SCANST.code;
+  closeScan();
+  if(cb) cb({code, price:0, manual:true});
 }
 
 /* ============================================================
